@@ -1,11 +1,5 @@
 import time
 
-from aggregators.count import CountAggregator
-from aggregators.sum import SumAggregator
-from aggregators.min import MinAggregator
-from aggregators.max import MaxAggregator
-from aggregators.null_count import NullCountAggregator
-
 
 NUMERIC_TYPES = {
     "BIGINT",
@@ -26,58 +20,53 @@ class Describe:
 
     def __init__(self, reader):
         self.reader = reader
-        self.columns = {}
-
-    def _build(self):
-
-        for name, dtype, *_ in self.reader.schema():
-
-            aggs = [
-                CountAggregator(name),
-                NullCountAggregator(name),
-            ]
-
-            if dtype in NUMERIC_TYPES:
-                aggs.extend([
-                    SumAggregator(name),
-                    MinAggregator(name),
-                    MaxAggregator(name),
-                ])
-
-            self.columns[name] = {
-                "dtype": dtype,
-                "aggs": aggs,
-            }
 
     def describe(self):
 
         start = time.perf_counter()
 
-        self._build()
+        schema = self.reader.schema()
 
-        chunk_size = 500000
+        exprs = []
+        col_meta = {}
 
-        for batch in self.reader.read_chunks(chunk_size):
+        for name, dtype, *_ in schema:
 
-            for col in self.columns.values():
+            safe = f'"{name}"'
+            is_numeric = dtype in NUMERIC_TYPES
 
-                for agg in col["aggs"]:
-                    agg.update(batch)
+            # count(col) skips nulls; count(*) - count(col) = null_count.
+            # both computed in the SAME scan as sum/min/max below --
+            # one query, one pass over the file, DuckDB fuses all
+            # aggregates internally.
+            exprs.append(f'count({safe}) AS "{name}__count"')
+            exprs.append(f'count(*) - count({safe}) AS "{name}__null_count"')
+
+            if is_numeric:
+                exprs.append(f'sum({safe}) AS "{name}__sum"')
+                exprs.append(f'min({safe}) AS "{name}__min"')
+                exprs.append(f'max({safe}) AS "{name}__max"')
+
+            col_meta[name] = {"dtype": dtype, "numeric": is_numeric}
+
+        row = self.reader.aggregate(exprs)
 
         result = {}
 
-        for name, col in self.columns.items():
+        for name, meta in col_meta.items():
 
-            row = {
-                "dtype": col["dtype"]
+            entry = {
+                "dtype": meta["dtype"],
+                "count": row[f"{name}__count"],
+                "null_count": row[f"{name}__null_count"],
             }
 
-            for agg in col["aggs"]:
+            if meta["numeric"]:
+                entry["sum"] = row[f"{name}__sum"]
+                entry["min"] = row[f"{name}__min"]
+                entry["max"] = row[f"{name}__max"]
 
-                key = agg.__class__.__name__.replace("Aggregator", "").lower()
-                row[key] = agg.finalize()
-
-            result[name] = row
+            result[name] = entry
 
         exec_time = round(time.perf_counter() - start, 3)
 

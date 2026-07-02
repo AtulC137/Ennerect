@@ -7,25 +7,24 @@ class CSVReader:
         self.con = duckdb.connect()
         self.path = path
 
-        # build query ONCE (no re-execution per batch)
-        self.query = f"""
-            SELECT *
-            FROM read_csv_auto(
-                '{self.path}',
-                sample_size=-1
-            )
-        """
+        # small sample for type sniff only -- NOT full-file scan.
+        # old code used sample_size=-1, forcing a full CSV parse just to
+        # detect types, then a SECOND full parse to read data.
+        self.scan_expr = f"read_csv_auto('{self.path}', sample_size=20480)"
 
     def schema(self):
+        return self.con.execute(
+            f"DESCRIBE SELECT * FROM {self.scan_expr}"
+        ).fetchall()
 
-        return self.con.execute(f"""
-            DESCRIBE {self.query}
-        """).fetchall()
-
-    def read_chunks(self, chunk_size):
-
-        reader = self.con.execute(self.query)
-
-        batches = reader.fetch_record_batch(rows_per_batch=chunk_size)
-
-        yield from batches
+    def aggregate(self, sql_exprs):
+        """
+        Run ONE aggregate query over the whole file, single pass.
+        DuckDB's own engine handles vectorization + multithreading +
+        streaming (bounded RAM) internally -- no manual chunking needed.
+        """
+        query = f"SELECT {', '.join(sql_exprs)} FROM {self.scan_expr}"
+        cursor = self.con.execute(query)
+        row = cursor.fetchone()
+        cols = [d[0] for d in cursor.description]
+        return dict(zip(cols, row))
