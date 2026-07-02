@@ -1,0 +1,10 @@
+stats-engine/app/data/export.csv
+app/data/
+app/data/*.csv
+app/data/*.json
+app/data/
+
+
+app/data/
+__pycache__/
+*.pyc

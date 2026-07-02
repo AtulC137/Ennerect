@@ -1,0 +1,8 @@
+duckdb
+pyarrow
+polars
+numpy
+scipy
+fastapi
+uvicorn
+pytest
